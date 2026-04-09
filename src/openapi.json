@@ -1,0 +1,614 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ERP.AERO API",
+    "description": "REST API на Express: **JWT access** (10 мин) + **refresh**, MySQL, MinIO.\n\n- **id** при регистрации/входе — email или телефон (10–15 цифр, без маски).\n- Защищённые методы: заголовок `Authorization: Bearer <access_token>`.\n- После **GET /logout** текущая сессия отзывается; другие устройства того же пользователя продолжают работать.\n\nНажмите **Authorize**, вставьте `access_token` (без префикса Bearer в поле — Swagger добавит сам).",
+    "version": "1.0.0"
+  },
+  "tags": [
+    { "name": "Health", "description": "Проверка доступности" },
+    { "name": "Auth", "description": "Регистрация, вход, обновление токенов, профиль, выход" },
+    { "name": "Files", "description": "Файлы в MinIO, метаданные в MySQL" }
+  ],
+  "servers": [{ "url": "/", "description": "Текущий хост (например http://localhost:3000)" }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Access JWT из ответа POST `/signin`, `/signup` или `/signin/new_token`"
+      }
+    },
+    "schemas": {
+      "SignInBody": {
+        "type": "object",
+        "required": ["id", "password"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Email или номер телефона (цифры)",
+            "example": "user@example.com"
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "minLength": 6,
+            "example": "secret12"
+          }
+        }
+      },
+      "RefreshBody": {
+        "type": "object",
+        "required": ["refresh_token"],
+        "properties": {
+          "refresh_token": {
+            "type": "string",
+            "description": "Opaque refresh из пары при входе/регистрации или после new_token",
+            "example": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567890abcdef"
+          }
+        }
+      },
+      "TokensPair": {
+        "type": "object",
+        "required": ["access_token", "refresh_token"],
+        "properties": {
+          "access_token": { "type": "string" },
+          "refresh_token": { "type": "string" }
+        }
+      },
+      "UserInfo": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Тот же id, что при регистрации (email или телефон)" }
+        }
+      },
+      "FileMeta": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "original_name": { "type": "string" },
+          "extension": { "type": "string" },
+          "mime_type": { "type": "string" },
+          "size_bytes": { "type": "integer", "format": "int64" },
+          "uploaded_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "FileListResponse": {
+        "type": "object",
+        "properties": {
+          "page": { "type": "integer" },
+          "list_size": { "type": "integer" },
+          "total": { "type": "integer" },
+          "total_pages": { "type": "integer" },
+          "files": { "type": "array", "items": { "$ref": "#/components/schemas/FileMeta" } }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "Сервис отвечает",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } } },
+                "example": { "ok": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/signup": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Регистрация",
+        "description": "Создаёт пользователя и сразу возвращает пару токенов (новая сессия).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SignInBody" },
+              "examples": {
+                "email": {
+                  "summary": "Email",
+                  "value": { "id": "newuser@example.com", "password": "secret12" }
+                },
+                "phone": {
+                  "summary": "Телефон",
+                  "value": { "id": "77001234567", "password": "secret12" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Пользователь создан, выданы токены",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TokensPair" },
+                "example": {
+                  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJuZXd1c2VyQGV4YW1wbGUuY29tIiwic2lkIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIiwianRpIjoiMjIyMjIyMjItMjIyMi0yMjIyLTIyMjItMjIyMjIyMjIyMjIyIiwidHlwIjoiYWNjZXNzIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjE3MDAwMDA2MDB9.example",
+                  "refresh_token": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Невалидное тело",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorBody" },
+                "example": { "error": "password must be at least 6 characters" }
+              }
+            }
+          },
+          "409": {
+            "description": "Пользователь уже существует",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorBody" },
+                "example": { "error": "User already exists" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/signin": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Вход",
+        "description": "Новая сессия и новая пара токенов.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SignInBody" },
+              "example": { "id": "user@example.com", "password": "secret12" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Успешный вход",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TokensPair" },
+                "example": {
+                  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyQGV4YW1wbGUuY29tIiwic2lkIjoiMzMzMzMzMzMtMzMzMy0zMzMzLTMzMzMtMzMzMzMzMzMzMzMzIiwianRpIjoiNDQ0NDQ0NDQtNDQ0NC00NDQ0LTQ0NDQtNDQ0NDQ0NDQ0NDQ0NCIsInR5cCI6ImFjY2VzcyIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAwNjAwfQ.example",
+                  "refresh_token": "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный id или пароль (одинаковый текст для отсутствующего пользователя и неверного пароля)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorBody" },
+                "example": { "error": "Invalid id or password" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/signin/new_token": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Обновить access по refresh",
+        "description": "Ротация refresh: старый refresh перестаёт действовать, выдаётся новая пара.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RefreshBody" },
+              "example": {
+                "refresh_token": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Новая пара токенов",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TokensPair" },
+                "example": {
+                  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyQGV4YW1wbGUuY29tIiwic2lkIjoiMzMzMzMzMzMtMzMzMy0zMzMzLTMzMzMtMzMzMzMzMzMzMzMzIiwianRpIjoiNTU1NTU1NTUtNTU1NS01NTU1LTU1NTUtNTU1NTU1NTU1NTU1NSIsInR5cCI6ImFjY2VzcyIsImlhdCI6MTcwMDAwMDYwMCwiZXhwIjoxNzAwMDAxMjAwfQ.example",
+                  "refresh_token": "newrefreshnewrefreshnewrefreshnewrefreshnewrefreshnewrefreshnewrefreshnewrefreshnewrefreshnewrefreshnewrefreshnewrefreshnewrefresh"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": { "error": "refresh_token is required" }
+              }
+            }
+          },
+          "401": {
+            "description": "Невалидный или истёкший refresh, либо сессия отозвана (logout)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorBody" },
+                "example": { "error": "Invalid or expired refresh token" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/info": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "Текущий пользователь (id)",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "id из токена",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserInfo" },
+                "example": { "id": "user@example.com" }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": { "error": "Unauthorized" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/logout": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "Выход (только эта сессия)",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Сессия отозвана",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } } },
+                "example": { "ok": true }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": { "error": "Unauthorized" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/file/upload": {
+      "post": {
+        "tags": ["Files"],
+        "summary": "Загрузить файл",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary", "description": "Произвольный файл" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Файл в MinIO, метаданные в БД",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "file": { "$ref": "#/components/schemas/FileMeta" }
+                  }
+                },
+                "example": {
+                  "file": {
+                    "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+                    "original_name": "report.pdf",
+                    "extension": "pdf",
+                    "mime_type": "application/pdf",
+                    "size_bytes": 102400,
+                    "uploaded_at": "2026-04-09T12:00:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": { "error": "file field is required (multipart/form-data)" }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": { "error": "Unauthorized" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/file/list": {
+      "get": {
+        "tags": ["Files"],
+        "summary": "Список файлов (пагинация)",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "default": 1 },
+            "description": "Номер страницы"
+          },
+          {
+            "name": "list_size",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
+            "description": "Размер страницы (по умолчанию 10)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Список и счётчики",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FileListResponse" },
+                "example": {
+                  "page": 1,
+                  "list_size": 10,
+                  "total": 1,
+                  "total_pages": 1,
+                  "files": [
+                    {
+                      "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+                      "original_name": "report.pdf",
+                      "extension": "pdf",
+                      "mime_type": "application/pdf",
+                      "size_bytes": 102400,
+                      "uploaded_at": "2026-04-09T12:00:00.000Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": { "error": "Unauthorized" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/file/{id}": {
+      "get": {
+        "tags": ["Files"],
+        "summary": "Метаданные файла",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "example": "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "file": { "$ref": "#/components/schemas/FileMeta" }
+                  }
+                },
+                "example": {
+                  "file": {
+                    "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+                    "original_name": "report.pdf",
+                    "extension": "pdf",
+                    "mime_type": "application/pdf",
+                    "size_bytes": 102400,
+                    "uploaded_at": "2026-04-09T12:00:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": { "error": "File not found" }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": { "error": "Unauthorized" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/file/download/{id}": {
+      "get": {
+        "tags": ["Files"],
+        "summary": "Скачать файл",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Бинарное тело файла, заголовок Content-Disposition: attachment",
+            "content": {
+              "application/octet-stream": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": { "error": "File not found" }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": { "error": "Unauthorized" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/file/update/{id}": {
+      "put": {
+        "tags": ["Files"],
+        "summary": "Заменить файл",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "file": {
+                    "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+                    "original_name": "report-v2.pdf",
+                    "extension": "pdf",
+                    "mime_type": "application/pdf",
+                    "size_bytes": 204800,
+                    "uploaded_at": "2026-04-09T14:00:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": { "error": "File not found" }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": { "error": "Unauthorized" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/file/delete/{id}": {
+      "delete": {
+        "tags": ["Files"],
+        "summary": "Удалить файл",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": { "ok": true }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": { "error": "File not found" }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": { "error": "Unauthorized" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
